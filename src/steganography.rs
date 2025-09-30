@@ -1,6 +1,6 @@
 use crate::dct::DctProcessor;
 use crate::error::{Result, SteganographyError};
-use image::{Luma, Rgb, RgbImage, GrayImage};
+use image::{GrayImage, Luma, Rgb, RgbImage};
 use jpeg_encoder::{ColorType, Encoder};
 
 /// Standard JPEG luminance quantization table
@@ -39,7 +39,7 @@ impl Default for EmbeddingConfiguration {
                 (3, 4),
                 (4, 3),
             ],
-            embedding_strength: 25.0,  // Strong enough to survive JPEG compression
+            embedding_strength: 25.0, // Strong enough to survive JPEG compression
             minimum_quantization_step: 4.0,
         }
     }
@@ -138,12 +138,12 @@ impl SteganographyEngine {
         let mut quantization_table = [[0.0f32; 8]; 8];
         for row_index in 0..8 {
             for column_index in 0..8 {
-                let quantized_value = ((JPEG_LUMINANCE_QUANTIZATION_TABLE[row_index][column_index]
-                    * scaling_factor
-                    + 50.0)
-                    / 100.0)
-                    .floor()
-                    .clamp(1.0, 255.0);
+                let quantized_value =
+                    ((JPEG_LUMINANCE_QUANTIZATION_TABLE[row_index][column_index] * scaling_factor
+                        + 50.0)
+                        / 100.0)
+                        .floor()
+                        .clamp(1.0, 255.0);
                 quantization_table[row_index][column_index] = quantized_value;
             }
         }
@@ -161,9 +161,11 @@ impl SteganographyEngine {
 
     /// Calculates maximum data capacity for a grayscale image in bits (legacy support)
     pub fn calculate_grayscale_capacity_bits(&self, grayscale_image: &GrayImage) -> usize {
-        let horizontal_blocks = (grayscale_image.width() as usize + self.configuration.block_size - 1)
+        let horizontal_blocks = (grayscale_image.width() as usize + self.configuration.block_size
+            - 1)
             / self.configuration.block_size;
-        let vertical_blocks = (grayscale_image.height() as usize + self.configuration.block_size - 1)
+        let vertical_blocks = (grayscale_image.height() as usize + self.configuration.block_size
+            - 1)
             / self.configuration.block_size;
         horizontal_blocks * vertical_blocks // One bit per block for robustness
     }
@@ -216,11 +218,7 @@ impl SteganographyEngine {
 
                 // Embed bit using quantization-aware robust method
                 let bit_to_embed = bit_stream[current_bit_index];
-                self.embed_bit_robustly(
-                    &mut luminance_block,
-                    bit_to_embed,
-                    &quantization_table,
-                );
+                self.embed_bit_robustly(&mut luminance_block, bit_to_embed, &quantization_table);
 
                 current_bit_index += 1;
 
@@ -248,7 +246,7 @@ impl SteganographyEngine {
         block_y: usize,
     ) -> [[f32; 8]; 8] {
         let mut luminance_block = [[0f32; 8]; 8];
-        
+
         for y in 0..self.configuration.block_size {
             for x in 0..self.configuration.block_size {
                 let pixel_x = (block_x + x) as u32;
@@ -310,28 +308,32 @@ impl SteganographyEngine {
         }
     }
 
-    /// Embeds a bit robustly using the most reliable DCT coefficient
+    /// Embeds a bit robustly using multiple DCT coefficients for redundancy
     fn embed_bit_robustly(
         &self,
         dct_block: &mut [[f32; 8]; 8],
         bit_value: u8,
         quantization_table: &[[f32; 8]; 8],
     ) {
-        // Use the most robust position for embedding
-        let (coefficient_y, coefficient_x) = self.configuration.embedding_positions[0];
-        let coefficient = &mut dct_block[coefficient_y][coefficient_x];
-        let quantization_step = quantization_table[coefficient_y][coefficient_x]
-            .max(self.configuration.minimum_quantization_step);
-        let embedding_strength = self
-            .configuration
-            .embedding_strength
-            .max(quantization_step * 3.0);
+        // Use multiple positions for redundancy (first 4 positions)
+        let positions_to_use = &self.configuration.embedding_positions
+            [..4.min(self.configuration.embedding_positions.len())];
 
-        // Use strong coefficient modification for JPEG compression survival
-        if bit_value == 1 {
-            *coefficient = embedding_strength; // Strongly positive for bit 1
-        } else {
-            *coefficient = -embedding_strength; // Strongly negative for bit 0
+        for &(coefficient_y, coefficient_x) in positions_to_use {
+            let coefficient = &mut dct_block[coefficient_y][coefficient_x];
+            let quantization_step = quantization_table[coefficient_y][coefficient_x]
+                .max(self.configuration.minimum_quantization_step);
+            let embedding_strength = self
+                .configuration
+                .embedding_strength
+                .max(quantization_step * 3.0);
+
+            // Use strong coefficient modification for JPEG compression survival
+            if bit_value == 1 {
+                *coefficient = embedding_strength; // Strongly positive for bit 1
+            } else {
+                *coefficient = -embedding_strength; // Strongly negative for bit 0
+            }
         }
     }
 
@@ -346,7 +348,8 @@ impl SteganographyEngine {
 
         // Extract bits from all blocks
         for block_y in (0..steganographic_image.height()).step_by(self.configuration.block_size) {
-            for block_x in (0..steganographic_image.width()).step_by(self.configuration.block_size) {
+            for block_x in (0..steganographic_image.width()).step_by(self.configuration.block_size)
+            {
                 let mut luminance_block = self.extract_luminance_block_from_rgb(
                     steganographic_image,
                     block_x as usize,
@@ -386,29 +389,45 @@ impl SteganographyEngine {
 
         println!("Extracted {} bits total", extracted_bits.len());
 
-        // Debug information about extracted length
-        if extracted_bits.len() >= 32 {
-            let mut decoded_length = 0u32;
-            for bit_index in 0..32 {
-                decoded_length = (decoded_length << 1) | (extracted_bits[bit_index] as u32);
-            }
-            println!("Decoded data length from header: {} bytes", decoded_length);
-        }
-
         self.convert_bits_to_data_with_header(&extracted_bits)
     }
 
-    /// Extracts a bit robustly using the most reliable coefficient
+    /// Extracts a bit robustly using majority voting from multiple coefficients
     fn extract_bit_robustly(&self, dct_block: &[[f32; 8]; 8]) -> u8 {
-        // Use the same robust position used for embedding
-        let (coefficient_y, coefficient_x) = self.configuration.embedding_positions[0];
-        let coefficient_value = dct_block[coefficient_y][coefficient_x];
+        // Use multiple positions for majority voting to improve reliability
+        let positions_to_check = &self.configuration.embedding_positions
+            [..4.min(self.configuration.embedding_positions.len())];
 
-        // Simple threshold-based extraction
-        if coefficient_value > 1.0 {
+        let mut votes_for_1 = 0;
+        let mut votes_for_0 = 0;
+
+        for &(coefficient_y, coefficient_x) in positions_to_check {
+            let coefficient_value = dct_block[coefficient_y][coefficient_x];
+
+            // Use a more conservative threshold
+            if coefficient_value > 10.0 {
+                votes_for_1 += 1;
+            } else if coefficient_value < -10.0 {
+                votes_for_0 += 1;
+            }
+            // Values between -10 and 10 are considered neutral (no vote)
+        }
+
+        // If we have votes, use majority decision
+        if votes_for_1 > votes_for_0 {
             1
-        } else {
+        } else if votes_for_0 > votes_for_1 {
             0
+        } else {
+            // If tied or no clear votes, check the primary coefficient with lower threshold
+            let (primary_y, primary_x) = self.configuration.embedding_positions[0];
+            let primary_value = dct_block[primary_y][primary_x];
+
+            if primary_value > 0.0 {
+                1
+            } else {
+                0
+            }
         }
     }
 
@@ -442,7 +461,7 @@ impl SteganographyEngine {
     }
 
     // Legacy methods for grayscale image support
-    
+
     /// Hides data in grayscale image (legacy method)
     pub fn hide_data_in_grayscale_image(
         &mut self,
@@ -470,11 +489,8 @@ impl SteganographyEngine {
                     return Ok(steganographic_image);
                 }
 
-                let mut grayscale_block = self.extract_grayscale_block(
-                    source_image,
-                    block_x as usize,
-                    block_y as usize,
-                );
+                let mut grayscale_block =
+                    self.extract_grayscale_block(source_image, block_x as usize, block_y as usize);
 
                 self.dct_processor.apply_forward_dct(&mut grayscale_block)?;
 
@@ -551,7 +567,8 @@ impl SteganographyEngine {
         let total_capacity = self.calculate_grayscale_capacity_bits(steganographic_image);
 
         for block_y in (0..steganographic_image.height()).step_by(self.configuration.block_size) {
-            for block_x in (0..steganographic_image.width()).step_by(self.configuration.block_size) {
+            for block_x in (0..steganographic_image.width()).step_by(self.configuration.block_size)
+            {
                 let mut grayscale_block = self.extract_grayscale_block(
                     steganographic_image,
                     block_x as usize,
@@ -635,7 +652,9 @@ mod tests {
         let stego_engine = SteganographyEngine::new();
         let test_data = b"Hello, World! This is a test message.";
         let bit_stream = stego_engine.convert_data_to_bits_with_header(test_data);
-        let recovered_data = stego_engine.convert_bits_to_data_with_header(&bit_stream).unwrap();
+        let recovered_data = stego_engine
+            .convert_bits_to_data_with_header(&bit_stream)
+            .unwrap();
         assert_eq!(test_data.to_vec(), recovered_data);
     }
 
